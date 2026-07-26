@@ -419,6 +419,33 @@ impl Context {
     ) -> Result<(), ExecutionError> {
         self.wrapper.add_callback(name, callback)
     }
+
+    /// Create a native C module that exports Rust functions as JS module functions.
+    ///
+    /// This mirrors the fib.c C module pattern: Rust closures are wrapped via
+    /// `JS_NewCFunctionData` and registered as module exports via `JS_SetModuleExport`.
+    ///
+    /// The returned [`NativeModuleBuilder`](bindings::NativeModuleBuilder) allows
+    /// adding multiple function exports before calling `build()` to finalize.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use deft_quick_js::Context;
+    /// let context = Context::new().unwrap();
+    /// let ns = context.create_module("fib_module")
+    ///     .add_function("fib", |n: i32| -> i32 {
+    ///         if n <= 0 { 0 } else if n == 1 { 1 } else { n }
+    ///     })
+    ///     .add_function("add", |a: i32, b: i32| -> i32 { a + b })
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    pub fn create_module(
+        &self,
+        module_name: &str,
+    ) -> bindings::NativeModuleBuilder<'_> {
+        self.wrapper.create_module(module_name)
+    }
     
     pub fn execute_pending_job(&self) -> Result<bool, ExecutionError> {
         self.wrapper.execute_pending_job()

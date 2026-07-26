@@ -5,9 +5,9 @@ mod droppable_value;
 //TODO no pub?
 pub mod value;
 
-use std::{ffi::CString, os::raw::{c_int, c_void}, sync::Mutex};
+use std::{collections::HashMap, ffi::{CStr, CString}, os::raw::{c_int, c_void}, sync::Mutex};
 use std::any::Any;
-use std::cell::{Cell};
+use std::cell::{Cell, UnsafeCell};
 use std::ptr::{null_mut};
 use std::rc::Rc;
 use anyhow::Context;
@@ -21,7 +21,7 @@ use value::{JsFunction, OwnedJsObject};
 pub use value::{JsCompiledFunction, OwnedJsValue};
 use crate::bindings::convert::deserialize_value;
 use crate::exception::{HostPromiseRejectionTracker, HostPromiseRejectionTrackerWrapper};
-use crate::loader::{quickjs_rs_module_loader, JsModuleLoader};
+use crate::loader::{quickjs_rs_module_loader, JsModuleLoader, ModuleLoaderData, NoopModuleLoader};
 
 // JS_TAG_* constants from quickjs.
 // For some reason bindgen does not pick them up.
@@ -369,24 +369,57 @@ impl<'a> OwnedObjectRef<'a> {
     }
 }
 
-/*
-type ModuleInit = dyn Fn(*mut q::JSContext, *mut q::JSModuleDef);
-
-thread_local! {
-    static NATIVE_MODULE_INIT: RefCell<Option<Box<ModuleInit>>> = RefCell::new(None);
+/// Data stored in context opaque for native module init callbacks.
+/// Each entry maps a module name to its list of (export_name, func_value) pairs.
+struct ModuleExportsData {
+    exports: HashMap<String, Vec<(CString, q::JSValue)>>,
 }
 
+impl Drop for ModuleExportsData {
+    fn drop(&mut self) {
+        // Note: JS_FreeValue cannot be called here because we don't have a context.
+        // The JSValues are freed when the context is freed (they are owned by the module's var_ref).
+    }
+}
+
+/// extern "C" init callback for native modules.
+/// Called during module evaluation when var_ref is set up.
 unsafe extern "C" fn native_module_init(
     ctx: *mut q::JSContext,
     m: *mut q::JSModuleDef,
-) -> ::std::os::raw::c_int {
-    NATIVE_MODULE_INIT.with(|init| {
-        let init = init.replace(None).unwrap();
-        init(ctx, m);
-    });
+) -> c_int {
+    let opaque = q::JS_GetContextOpaque(ctx);
+    if opaque.is_null() {
+        return -1;
+    }
+    let data = &*(opaque as *mut ModuleExportsData);
+
+    // Get module name from the module definition
+    let module_atom = q::JS_GetModuleName(ctx, m);
+    let module_name_ptr = q::JS_AtomToCString(ctx, module_atom);
+    if module_name_ptr.is_null() {
+        q::JS_FreeAtom(ctx, module_atom);
+        return -1;
+    }
+    let module_name = match CStr::from_ptr(module_name_ptr).to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            q::JS_FreeCString(ctx, module_name_ptr);
+            q::JS_FreeAtom(ctx, module_atom);
+            return -1;
+        }
+    };
+    q::JS_FreeCString(ctx, module_name_ptr);
+    q::JS_FreeAtom(ctx, module_atom);
+
+    if let Some(exports) = data.exports.get(&module_name) {
+        for (name, func_value) in exports {
+            let duped = q::JS_DupValue(ctx, *func_value);
+            q::JS_SetModuleExport(ctx, m, name.as_ptr(), duped);
+        }
+    }
     0
 }
-*/
 
 /// Wraps a quickjs context.
 ///
@@ -399,8 +432,12 @@ pub struct ContextWrapper {
     /// the closure.
     // A Mutex is used over a RefCell because it needs to be unwind-safe.
     callbacks: Mutex<Vec<(Box<WrappedCallback>, Box<q::JSValue>)>>,
-    module_loader: Option<*mut Box<dyn JsModuleLoader>>,
+    module_loader_data: Option<*mut ModuleLoaderData>,
     host_promise_rejection_tracker_wrapper: Option<*mut HostPromiseRejectionTrackerWrapper>,
+    /// Stores native C module definitions by name for import resolution.
+    native_modules: Mutex<HashMap<String, *mut q::JSModuleDef>>,
+    /// Stores native module export data for init callbacks (pointed to by context opaque).
+    module_exports_data: UnsafeCell<Option<*mut ModuleExportsData>>,
 }
 
 impl Drop for ContextWrapper {
@@ -408,6 +445,18 @@ impl Drop for ContextWrapper {
         unsafe {
             {
                 if let Some(p) = self.host_promise_rejection_tracker_wrapper {
+                    let _ = Box::from_raw(p);
+                }
+            }
+            {
+                if let Some(p) = *self.module_exports_data.get() {
+                    // Free the JSValues stored in the export data
+                    let data = &*p;
+                    for exports in data.exports.values() {
+                        for (_, func_value) in exports {
+                            q::JS_FreeValue(self.context, *func_value);
+                        }
+                    }
                     let _ = Box::from_raw(p);
                 }
             }
@@ -447,13 +496,19 @@ impl ContextWrapper {
 
         // Initialize the promise resolver helper code.
         // This code is needed by Self::resolve_value
-        let wrapper = Self {
+        let mut wrapper = Self {
             runtime,
             context,
             callbacks: Mutex::new(Vec::new()),
-            module_loader: None,
+            module_loader_data: None,
             host_promise_rejection_tracker_wrapper: None,
+            native_modules: Mutex::new(HashMap::new()),
+            module_exports_data: UnsafeCell::new(None),
         };
+
+        // Register default module loader so native modules can be imported
+        // without requiring explicit set_module_loader call.
+        wrapper.set_module_loader(Box::new(NoopModuleLoader));
 
         Ok(wrapper)
     }
@@ -468,11 +523,20 @@ impl ContextWrapper {
     }
 
     pub fn set_module_loader(&mut self, module_loader: Box<dyn JsModuleLoader>) {
-        let module_loader= Box::new(module_loader);
+        let user_loader = Box::new(module_loader);
+        let data = Box::new(ModuleLoaderData {
+            user_loader: Box::into_raw(user_loader),
+            native_modules: &self.native_modules as *const _,
+        });
         unsafe {
-            let module_loader = Box::into_raw(module_loader);
-            self.module_loader = Some(module_loader);
-            q::JS_SetModuleLoaderFunc(self.runtime, None, Some(quickjs_rs_module_loader), module_loader as *mut c_void);
+            let data_ptr = Box::into_raw(data);
+            self.module_loader_data = Some(data_ptr);
+            q::JS_SetModuleLoaderFunc(
+                self.runtime,
+                None,
+                Some(quickjs_rs_module_loader),
+                data_ptr as *mut c_void,
+            );
         }
     }
 
@@ -750,6 +814,23 @@ impl ContextWrapper {
         Ok(())
     }
 
+    /// Get the pointer to the native modules map.
+    pub fn native_modules_ptr(&self) -> *const Mutex<HashMap<String, *mut q::JSModuleDef>> {
+        &self.native_modules as *const _
+    }
+
+    /// Create a native C module builder that allows exporting Rust functions as JS module functions.
+    ///
+    /// Similar to the C pattern in fib.c, this creates a QuickJS native module
+    /// with functions exported via `JS_NewCFunctionData` + `JS_SetModuleExport`.
+    pub fn create_module(&self, module_name: &str) -> NativeModuleBuilder<'_> {
+        NativeModuleBuilder {
+            context: self,
+            module_name: module_name.to_string(),
+            exports: Vec::new(),
+        }
+    }
+
     /// return Ok(false) if no job pending, Ok(true) if a job was executed successfully.
     pub fn execute_pending_job(&self) -> Result<bool, ExecutionError> {
         let mut job_ctx = null_mut();
@@ -767,16 +848,204 @@ impl ContextWrapper {
     }
 
     pub fn execute_module(&self, module_name: &str) -> Result<(), ExecutionError> {
-        if let Some(ml) = self.module_loader {
+        // Check native modules first
+        if let Some(m) = {
+            self.native_modules.lock().unwrap_or_else(|e| e.into_inner()).get(module_name).cloned()
+        } {
             unsafe {
-                let loader = &mut *ml;
-                let module = loader.load(module_name).map_err(|e| ExecutionError::Internal(format!("Fail to load module:{}", e)))?;
-                self.eval(&module, JS_EVAL_TYPE_MODULE, module_name)?;
-                Ok(())
+                let module_obj = q::JS_GetModuleNamespace(self.context, m);
+                if q::JS_IsException(module_obj) {
+                    let e = self.get_exception().unwrap_or_else(|| {
+                        ExecutionError::Exception("Failed to get module namespace".into())
+                    });
+                    return Err(e);
+                }
+                q::JS_FreeValue(self.context, module_obj);
             }
-        } else {
-            Err(ExecutionError::Internal("Module loader is not set".to_string()))
+            return Ok(());
         }
+
+        if let Some(ml) = self.module_loader_data {
+            unsafe {
+                let loader_data = &*ml;
+                if !loader_data.user_loader.is_null() {
+                    let loader = &mut *loader_data.user_loader;
+                    let module = loader.load(module_name).map_err(|e| ExecutionError::Internal(format!("Fail to load module:{}", e)))?;
+                    self.eval(&module, JS_EVAL_TYPE_MODULE, module_name)?;
+                    return Ok(());
+                }
+            }
+        }
+        Err(ExecutionError::Internal("Module loader is not set".to_string()))
     }
 
+}
+
+/// A builder for creating a native QuickJS C module that exports Rust functions.
+///
+/// This mirrors the fib.c C module pattern: functions are registered as module
+/// exports using `JS_NewCFunctionData` + `JS_SetModuleExport`.
+///
+/// # Example
+/// ```no_run
+/// # use deft_quick_js::Context;
+/// let context = Context::new().unwrap();
+/// context.create_module("my_module")
+///     .add_function("fib", |n: i32| -> i32 { n })
+///     .add_function("add", |a: i32, b: i32| -> i32 { a + b })
+///     .build()
+///     .unwrap();
+/// ```
+pub struct NativeModuleBuilder<'a> {
+    context: &'a ContextWrapper,
+    module_name: String,
+    exports: Vec<(String, usize, q::JSValue)>,
+}
+
+impl<'a> NativeModuleBuilder<'a> {
+    /// Add a function export to the module.
+    ///
+    /// The callback must satisfy the same requirements as `Context::add_callback`:
+    /// * accepts 0 - 5 arguments
+    /// * each argument must be convertible from a JsValue
+    /// * must return a value convertible to JsValue (or Result<T, E>)
+    pub fn add_function<F>(
+        mut self,
+        name: &str,
+        callback: impl Callback<F> + 'static,
+    ) -> Self {
+        let argcount = callback.argument_count();
+        let name_owned = name.to_string();
+        let context = self.context.context;
+        let func_name = name.to_string();
+        let wrapper = move |argc: c_int, argv: *mut q::JSValue| -> q::JSValue {
+            match ContextWrapper::exec_callback(context, argc, argv, &callback) {
+                Ok(value) => value,
+                Err(e) => {
+                    let js_exception_value = match e {
+                        ExecutionError::Exception(e) => e,
+                        other => format!("Failed to call [{}], {}", &func_name, other.to_string()).into(),
+                    };
+                    let js_exception =
+                        convert::serialize_value(context, js_exception_value).unwrap();
+                    unsafe {
+                        q::JS_Throw(context, js_exception);
+                    }
+                    q::JS_MKVAL(q::JS_TAG_EXCEPTION, 0)
+                }
+            }
+        };
+
+        let (pair, trampoline) = unsafe { build_closure_trampoline(wrapper) };
+        let data = (&*pair.1) as *const q::JSValue as *mut q::JSValue;
+        self.context.callbacks.lock().unwrap().push(pair);
+
+        let func_value = unsafe {
+            q::JS_NewCFunctionData(
+                self.context.context,
+                trampoline,
+                argcount as i32,
+                0,
+                1,
+                data,
+            )
+        };
+
+        self.exports.push((name_owned, argcount, func_value));
+        self
+    }
+
+    /// Finalize the builder and create the native C module.
+    ///
+    /// This creates a `JSModuleDef` via `JS_NewCModule`, registers each export
+    /// name via `JS_AddModuleExport`, and stores the module for import resolution.
+    /// The actual `JS_SetModuleExport` calls happen in the init callback
+    /// (called during module evaluation when `var_ref` is initialized).
+    ///
+    /// Returns a JS object representing the module namespace, with all exported
+    /// functions as properties.
+    pub fn build(self) -> Result<OwnedJsValue<'a>, ExecutionError> {
+        unsafe {
+            let module_name_c = make_cstring(self.module_name.as_str())?;
+
+            let m = q::JS_NewCModule(
+                self.context.context,
+                module_name_c.as_ptr(),
+                Some(native_module_init),
+            );
+
+            if m.is_null() {
+                for (_, _, fv) in &self.exports {
+                    q::JS_FreeValue(self.context.context, *fv);
+                }
+                return Err(ExecutionError::Internal(
+                    "Failed to create native module".into(),
+                ));
+            }
+
+            // Register export names (but don't call JS_SetModuleExport yet -
+            // that happens in native_module_init during module evaluation)
+            for (name, _argcount, _func_value) in &self.exports {
+                let name_c = make_cstring(name.as_str())?;
+                q::JS_AddModuleExport(
+                    self.context.context,
+                    m,
+                    name_c.as_ptr(),
+                );
+            }
+
+            self.context.native_modules.lock().unwrap_or_else(|e| e.into_inner()).insert(
+                self.module_name.clone(),
+                m,
+            );
+
+            // Store export data for the init callback
+            let mut exports_map: HashMap<String, Vec<(CString, q::JSValue)>> = HashMap::new();
+            let mut export_entries = Vec::new();
+            for (name, _argcount, func_value) in &self.exports {
+                let name_c = make_cstring(name.as_str())?;
+                // Dup the value: one ref for ModuleExportsData, one will be consumed by JS_SetModuleExport
+                let duped = q::JS_DupValue(self.context.context, *func_value);
+                export_entries.push((name_c, duped));
+            }
+            exports_map.insert(self.module_name.clone(), export_entries);
+
+            // Create or update ModuleExportsData
+            let cell = self.context.module_exports_data.get();
+            if let Some(existing) = *cell {
+                let data = &mut *existing;
+                for (mod_name, entries) in exports_map {
+                    data.exports.entry(mod_name).or_default().extend(entries);
+                }
+            } else {
+                let data = Box::new(ModuleExportsData { exports: exports_map });
+                let data_ptr = Box::into_raw(data);
+                *cell = Some(data_ptr);
+                q::JS_SetContextOpaque(self.context.context, data_ptr as *mut c_void);
+            }
+
+            // Build namespace object with all exports
+            let ns = q::JS_NewObject(self.context.context);
+            for (name, _argcount, func_value) in &self.exports {
+                let name_c = make_cstring(name.as_str())?;
+                q::JS_SetPropertyStr(
+                    self.context.context,
+                    ns,
+                    name_c.as_ptr(),
+                    q::JS_DupValue(self.context.context, *func_value),
+                );
+            }
+
+            // Free the original function values from JS_NewCFunctionData.
+            // All necessary references have been created via JS_DupValue:
+            // - one in ModuleExportsData (freed in ContextWrapper::drop)
+            // - one in the namespace object (freed when namespace is dropped)
+            // - one will be consumed by JS_SetModuleExport in the init callback
+            for (_, _, func_value) in self.exports {
+                q::JS_FreeValue(self.context.context, func_value);
+            }
+
+            Ok(OwnedJsValue::new(self.context, ns))
+        }
+    }
 }
