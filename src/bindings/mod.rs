@@ -435,7 +435,7 @@ pub struct ContextWrapper {
     module_loader_data: Option<*mut ModuleLoaderData>,
     host_promise_rejection_tracker_wrapper: Option<*mut HostPromiseRejectionTrackerWrapper>,
     /// Stores native C module definitions by name for import resolution.
-    native_modules: Mutex<HashMap<String, *mut q::JSModuleDef>>,
+    native_modules: Box<Mutex<HashMap<String, *mut q::JSModuleDef>>>,
     /// Stores native module export data for init callbacks (pointed to by context opaque).
     module_exports_data: UnsafeCell<Option<*mut ModuleExportsData>>,
 }
@@ -502,7 +502,7 @@ impl ContextWrapper {
             callbacks: Mutex::new(Vec::new()),
             module_loader_data: None,
             host_promise_rejection_tracker_wrapper: None,
-            native_modules: Mutex::new(HashMap::new()),
+            native_modules: Box::new(Mutex::new(HashMap::new())),
             module_exports_data: UnsafeCell::new(None),
         };
 
@@ -526,7 +526,7 @@ impl ContextWrapper {
         let user_loader = Box::new(module_loader);
         let data = Box::new(ModuleLoaderData {
             user_loader: Box::into_raw(user_loader),
-            native_modules: &self.native_modules as *const _,
+            native_modules: &*self.native_modules as *const _,
         });
         unsafe {
             let data_ptr = Box::into_raw(data);
@@ -816,7 +816,7 @@ impl ContextWrapper {
 
     /// Get the pointer to the native modules map.
     pub fn native_modules_ptr(&self) -> *const Mutex<HashMap<String, *mut q::JSModuleDef>> {
-        &self.native_modules as *const _
+        &*self.native_modules as *const _
     }
 
     /// Create a native C module builder that allows exporting Rust functions as JS module functions.
