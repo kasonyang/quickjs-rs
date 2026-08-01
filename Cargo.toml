@@ -15,12 +15,9 @@ features = [ "chrono", "bigint", "log" ]
 
 [features]
 default = ["chrono"]
-#patched = ["libquickjs-sys/patched"]
-#bigint = ["num-bigint", "num-traits", "libquickjs-sys/patched"]
 bigint = ["num-bigint", "num-traits"]
 
 [dependencies]
-#libquickjs-sys = { package = "deft-libquickjs-sys", version = ">= 0.9.0, < 0.10.0", path = "./libquickjs-sys" }
 libquickjs-sys = { package = "deft-rquickjs-sys", version = "0.10.1", features = ["bindgen", "logging"]}
 chrono = { version = "0.4.7", optional = true }
 num-bigint = { version = "0.2.2", optional = true }
@@ -29,8 +26,4 @@ log = { version = "0.4.8", optional = true }
 once_cell = "1.2.0"
 anyhow = "1.0.86"
 
-#[workspace]
-#members = [
-#    "libquickjs-sys",
-#]
 
