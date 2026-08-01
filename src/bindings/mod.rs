@@ -21,7 +21,7 @@ use value::{JsFunction, OwnedJsObject};
 pub use value::{JsCompiledFunction, OwnedJsValue};
 use crate::bindings::convert::deserialize_value;
 use crate::exception::{HostPromiseRejectionTracker, HostPromiseRejectionTrackerWrapper};
-use crate::loader::{quickjs_rs_module_loader, JsModuleLoader, ModuleLoaderData, NoopModuleLoader};
+use crate::loader::{quickjs_rs_module_loader, quickjs_rs_module_normalize_func, JsModuleLoader, ModuleLoaderData, NoopModuleLoader};
 
 // JS_TAG_* constants from quickjs.
 // For some reason bindgen does not pick them up.
@@ -533,7 +533,7 @@ impl ContextWrapper {
             self.module_loader_data = Some(data_ptr);
             q::JS_SetModuleLoaderFunc(
                 self.runtime,
-                None,
+                Some(quickjs_rs_module_normalize_func),
                 Some(quickjs_rs_module_loader),
                 data_ptr as *mut c_void,
             );

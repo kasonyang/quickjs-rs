@@ -9,13 +9,113 @@ use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::str::FromStr;
 use std::sync::Mutex;
-use libquickjs_sys::{JS_Eval, JS_EVAL_FLAG_COMPILE_ONLY, JS_EVAL_TYPE_MODULE, JS_FreeValue, JS_IsException, JSContext, JSModuleDef, size_t, JS_VALUE_GET_PTR};
+use libquickjs_sys::{JS_Eval, JS_EVAL_FLAG_COMPILE_ONLY, JS_EVAL_TYPE_MODULE, JS_FreeValue, JS_IsException, JSContext, JSModuleDef, size_t, JS_VALUE_GET_PTR, js_malloc, js_strdup};
 
 /// Combined loader data: holds both the user's JS module loader and a pointer
 /// to the native module definitions map.
 pub(crate) struct ModuleLoaderData {
     pub user_loader: *mut Box<dyn JsModuleLoader>,
     pub native_modules: *const Mutex<HashMap<String, *mut JSModuleDef>>,
+}
+
+/// JS module normalize function
+pub unsafe extern "C" fn quickjs_rs_module_normalize_func(
+    ctx: *mut JSContext,
+    module_base_name: *const ::std::os::raw::c_char,
+    module_name: *const ::std::os::raw::c_char,
+    opaque: *mut ::std::os::raw::c_void,
+) -> *mut ::std::os::raw::c_char {
+    if module_base_name.is_null() || module_name.is_null() {
+        return std::ptr::null_mut();
+    }
+    if let Some(resolved) = resolve_by_loader(module_base_name, module_name, opaque) {
+        return js_strdup(ctx, CString::new(resolved).unwrap_or_default().as_ptr());
+    }
+    default_module_normalize_func(ctx, module_base_name, module_name)
+}
+
+unsafe fn resolve_by_loader( module_base_name: *const ::std::os::raw::c_char,
+                      module_name: *const ::std::os::raw::c_char,
+                      opaque: *mut ::std::os::raw::c_void) -> Option<String> {
+    let data = &*(opaque as *mut ModuleLoaderData);
+    if !data.user_loader.is_null() {
+        let module_base_name = CStr::from_ptr(module_base_name);
+        let module_name = CStr::from_ptr(module_name);
+        let loader = &mut *data.user_loader;
+        loader.resolve_module_path(module_base_name.to_str().ok()?, module_name.to_str().ok()?)
+    } else {
+        None
+    }
+}
+
+unsafe fn default_module_normalize_func(
+    ctx: *mut JSContext,
+    module_base_name: *const ::std::os::raw::c_char,
+    module_name: *const ::std::os::raw::c_char,
+) -> *mut ::std::os::raw::c_char {
+    let name = CStr::from_ptr(module_name);
+    let name_bytes = name.to_bytes();
+
+    if name_bytes.is_empty() || name_bytes[0] != b'.' {
+        return js_strdup(ctx, module_name);
+    }
+
+    let base = CStr::from_ptr(module_base_name);
+    let base_bytes = base.to_bytes();
+
+    let dir_len = base_bytes.iter().rposition(|&b| b == b'/').map_or(0, |p| p);
+
+    let name_len = name_bytes.len();
+    let cap = dir_len + name_len + 2;
+    let filename = js_malloc(ctx, cap as size_t) as *mut u8;
+    if filename.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    std::ptr::copy_nonoverlapping(base_bytes.as_ptr(), filename, dir_len);
+    *filename.add(dir_len) = b'\0';
+
+    let mut f_len = dir_len;
+    let mut r = 0;
+    loop {
+        if r + 2 <= name_len && name_bytes[r] == b'.' && name_bytes[r + 1] == b'/' {
+            r += 2;
+        } else if r + 3 <= name_len
+            && name_bytes[r] == b'.'
+            && name_bytes[r + 1] == b'.'
+            && name_bytes[r + 2] == b'/'
+        {
+            if f_len == 0 {
+                break;
+            }
+            let filename_slice = std::slice::from_raw_parts(filename, f_len);
+            let last_slash = filename_slice.iter().rposition(|&b| b == b'/');
+            let last_elem_start = match last_slash {
+                Some(pos) => pos + 1,
+                None => 0,
+            };
+            let last_elem = &filename_slice[last_elem_start..];
+            if last_elem == b"." || last_elem == b".." {
+                break;
+            }
+            f_len = last_slash.unwrap_or_else(|| 0);
+            r += 3;
+        } else {
+            break;
+        }
+    }
+
+    if f_len > 0 {
+        *filename.add(f_len) = b'/';
+        f_len += 1;
+    }
+
+    let remaining = &name_bytes[r..];
+    std::ptr::copy_nonoverlapping(remaining.as_ptr(), filename.add(f_len), remaining.len());
+    f_len += remaining.len();
+    *filename.add(f_len) = b'\0';
+
+    filename as *mut ::std::os::raw::c_char
 }
 
 /// js module loader callback
@@ -73,8 +173,15 @@ pub unsafe extern "C" fn quickjs_rs_module_loader(
 
 /// js module loader trait
 pub trait JsModuleLoader: 'static {
+
+    /// resolve module path
+    fn resolve_module_path(&mut self, base_module_name: &str, module_name: &str) -> Option<String> {
+        let _ = (base_module_name, module_name);
+        None
+    }
+
     /// load a module
-    fn load(&mut self, module_name: &str) -> Result<String, io::Error>;
+    fn load(&mut self, module_name: &str) -> Result<String, Error>;
 }
 
 /// File system module loader
