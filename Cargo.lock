@@ -127,7 +127,7 @@ checksum = "06ea2b9bc92be3c2baa9334a323ebca2d6f074ff852cd1d7b11064035cd3868f"
 
 [[package]]
 name = "deft-quick-js"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -140,9 +140,9 @@ dependencies = [
 
 [[package]]
 name = "deft-rquickjs-sys"
-version = "0.10.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66ebe1ec3dbcfb8ba1dae9f1d3f52f4606ba9ad40d8e014b8b64001d9fc8567b"
+checksum = "7ed3338fd41841d26fdda197d03fee5ad81dcbd54e87cf129e48986159689ddf"
 dependencies = [
  "bindgen",
  "cc",
@@ -175,7 +175,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cea14ef9355e3beab063703aa9dab15afd25f0667c341310c1e5274bb1d0da18"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

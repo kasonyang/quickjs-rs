@@ -48,7 +48,7 @@ pub fn main() {
         .module_loader(MyModuleLoader)
         .build().unwrap();
 
-    let value = context.eval_module("import {fib} from 'fib';import {add} from './js-module';", "test/main.js").unwrap();
+    let value = context.eval_module("import {fib} from 'fib';import {add} from 'static://js-module'; add(1, 2); __console_write('log', import.meta.url);", "test/main.js").unwrap();
     println!("init time: {}ms", start_time.elapsed().as_millis());
     println!("result {:?}", value);
 }

@@ -12,7 +12,7 @@ use std::ptr::{null_mut};
 use std::rc::Rc;
 use anyhow::Context;
 use libquickjs_sys as q;
-use libquickjs_sys::{JS_EVAL_TYPE_MODULE, JSClassID, JSContext, JSValue, JS_VALUE_GET_PTR};
+use libquickjs_sys::{JS_EVAL_TYPE_MODULE, JSClassID, JSContext, JSValue, JS_VALUE_GET_PTR, JS_EVAL_FLAG_COMPILE_ONLY, JS_EvalFunction};
 
 use crate::{callback::{Arguments, Callback}, console::ConsoleBackend, ContextError, ExecutionError, JsValue, ResourceValue, ValueError};
 
@@ -663,11 +663,15 @@ impl ContextWrapper {
     }
 
     /// Evaluate javascript code.
-    pub fn eval<'a>(&'a self, code: &str, eval_type: u32, filename: &str) -> Result<OwnedJsValue<'a>, ExecutionError> {
+    pub fn eval<'a>(&'a self, code: &str, mut eval_type: u32, filename: &str) -> Result<OwnedJsValue<'a>, ExecutionError> {
         let filename_c = make_cstring(filename)?;
         let code_c = make_cstring(code)?;
 
-        let value_raw = unsafe {
+        let is_module = eval_type & JS_EVAL_TYPE_MODULE != 0;
+        if is_module {
+            eval_type |= JS_EVAL_FLAG_COMPILE_ONLY;
+        }
+        let mut value_raw = unsafe {
             q::JS_Eval(
                 self.context,
                 code_c.as_ptr(),
@@ -676,6 +680,12 @@ impl ContextWrapper {
                 eval_type as i32,
             )
         };
+        if is_module {
+            unsafe {
+                q::js_module_set_import_meta(self.context, value_raw, false, false);
+                value_raw = JS_EvalFunction(self.context, value_raw);
+            }
+        }
         let value = OwnedJsValue::new(self, value_raw);
         self.resolve_value(value)
     }
