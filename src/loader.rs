@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::str::FromStr;
 use std::sync::Mutex;
-use libquickjs_sys::{JS_Eval, JS_EVAL_FLAG_COMPILE_ONLY, JS_EVAL_TYPE_MODULE, JS_FreeValue, JS_IsException, JSContext, JSModuleDef, size_t, JS_VALUE_GET_PTR, js_malloc, js_strdup, js_module_set_import_meta};
+use libquickjs_sys::{JS_Eval, JS_EVAL_FLAG_COMPILE_ONLY, JS_EVAL_TYPE_MODULE, JS_FreeValue, JS_IsException, JSContext, JSModuleDef, size_t, JS_VALUE_GET_PTR, js_malloc, js_strdup};
 
 /// Combined loader data: holds both the user's JS module loader and a pointer
 /// to the native module definitions map.
@@ -165,7 +165,10 @@ pub unsafe extern "C" fn quickjs_rs_module_loader(
         return null_mut();
         // return Err(anyhow!("Failed to load module"));
     }
-    js_module_set_import_meta(ctx, func_val, false, false);
+
+    #[cfg(feature = "libc")]
+    libquickjs_sys::js_module_set_import_meta(ctx, func_val, false, false);
+
     let ptr = JS_VALUE_GET_PTR(func_val);
     JS_FreeValue(ctx, func_val);
     ptr as *mut JSModuleDef

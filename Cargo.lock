@@ -127,7 +127,7 @@ checksum = "06ea2b9bc92be3c2baa9334a323ebca2d6f074ff852cd1d7b11064035cd3868f"
 
 [[package]]
 name = "deft-quick-js"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -140,9 +140,9 @@ dependencies = [
 
 [[package]]
 name = "deft-rquickjs-sys"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ed3338fd41841d26fdda197d03fee5ad81dcbd54e87cf129e48986159689ddf"
+checksum = "4f4a1bb6c7b58cf069dce351f0818322897097e1f45aeb8573486b4b6ba90eb8"
 dependencies = [
  "bindgen",
  "cc",
