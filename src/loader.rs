@@ -167,7 +167,9 @@ pub unsafe extern "C" fn quickjs_rs_module_loader(
     }
 
     #[cfg(feature = "libc")]
-    libquickjs_sys::js_module_set_import_meta(ctx, func_val, false, false);
+    if libquickjs_sys::JS_VALUE_GET_TAG(func_val) == libquickjs_sys::JS_TAG_MODULE {
+        libquickjs_sys::js_module_set_import_meta(ctx, func_val, false, false);
+    }
 
     let ptr = JS_VALUE_GET_PTR(func_val);
     JS_FreeValue(ctx, func_val);

@@ -683,8 +683,10 @@ impl ContextWrapper {
         if is_module {
             unsafe {
                 #[cfg(feature = "libc")]
-                q::js_module_set_import_meta(self.context, value_raw, false, false);
-                value_raw = JS_EvalFunction(self.context, value_raw);
+                if libquickjs_sys::JS_VALUE_GET_TAG(value_raw) == libquickjs_sys::JS_TAG_MODULE {
+                    q::js_module_set_import_meta(self.context, value_raw, false, false);
+                    value_raw = JS_EvalFunction(self.context, value_raw);
+                }
             }
         }
         let value = OwnedJsValue::new(self, value_raw);
